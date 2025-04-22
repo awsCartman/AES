@@ -341,16 +341,31 @@ void xor_blocks(uint8_t (*block)[N], const uint8_t *other) {
     }
 }
 
+// Функция для преобразования одномерного массива в блок N×N
+void array_to_block(const uint8_t *array, uint8_t (*block)[N]) {
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            block[i][j] = array[i * N + j];
+        }
+    }
+}
+
+// Функция для преобразования блока N×N в одномерный массив
+void block_to_array(const uint8_t (*block)[N], uint8_t *array) {
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            array[i * N + j] = block[i][j];
+        }
+    }
+}
+
 void encrypt_file(const char *input_filename, const char *output_filename, const uint8_t *expandedKey) {
     FILE *input_file = fopen(input_filename, "rb");
     FILE *output_file = fopen(output_filename, "wb");
-    if (input_file == NULL) {
-        printf("Не удалось открыть входной файл\n");
-        return;
-    }
-    if (output_file == NULL) {
-        printf("Не удалось открыть выходной файл\n");
-        fclose(input_file);
+    if (input_file == NULL || output_file == NULL) {
+        printf("Ошибка открытия файла\n");
+        if (input_file) fclose(input_file);
+        if (output_file) fclose(output_file);
         return;
     }
 
@@ -358,52 +373,47 @@ void encrypt_file(const char *input_filename, const char *output_filename, const
     const long file_size = ftell(input_file);
     fseek(input_file, 0, SEEK_SET);
 
+    uint8_t buffer[BLOCK_SIZE];
     uint8_t block[N][N];
     size_t bytes_read;
     int padding_bytes = 0;
     const int is_whole_blocks = (file_size % BLOCK_SIZE == 0);
 
-    // CBC mode - используем первые 16 байт расширенного ключа как IV
+    // CBC mode
     uint8_t gamma[BLOCK_SIZE];
     memcpy(gamma, expandedKey, BLOCK_SIZE);
 
-    while ((bytes_read = fread(&block[0][0], 1, BLOCK_SIZE, input_file)) > 0) {
+    while ((bytes_read = fread(buffer, 1, BLOCK_SIZE, input_file)) > 0) {
         if (bytes_read < BLOCK_SIZE) {
-            printf("block size = %p\n", &bytes_read);
-            printf("Before padding:\n");
-            print_blck(block);
-
             padding_bytes = BLOCK_SIZE - bytes_read;
-            memset(&block[bytes_read / N][bytes_read % N], 0xFF, BLOCK_SIZE - bytes_read);
-            printf("After padding:\n");
-            print_blck(block);
+            memset(buffer + bytes_read, 0xFF, padding_bytes);
         }
 
-        // CBC: XOR с гаммой
-        xor_blocks(block, gamma);
+        // XOR с гаммой
+        for (int i = 0; i < BLOCK_SIZE; i++) {
+            buffer[i] ^= gamma[i];
+        }
 
-        // Шифрование блока
+        // Преобразование в блок, шифрование и обратно в массив
+        array_to_block(buffer, block);
         AES_Encrypt(block, expandedKey);
+        block_to_array(block, buffer);
 
-        // Сохраняем зашифрованный блок как новую гамму
-        memcpy(gamma, &block[0][0], BLOCK_SIZE);
+        // Сохранение гаммы для следующего блока
+        memcpy(gamma, buffer, BLOCK_SIZE);
 
-        fwrite(&block[0][0], 1, BLOCK_SIZE, output_file);
-        printf("Before padding:\n");
-        print_blck(block);
+        fwrite(buffer, 1, BLOCK_SIZE, output_file);
     }
 
     // Добавление дополнительных блоков
     if (is_whole_blocks) {
-        printf("adding blocks FF\n");
-        memset(&block[0][0], 0xFF, BLOCK_SIZE);
-        fwrite(&block[0][0], 1, BLOCK_SIZE, output_file);
-        fwrite(&block[0][0], 1, BLOCK_SIZE, output_file);
+        memset(buffer, 0xFF, BLOCK_SIZE);
+        fwrite(buffer, 1, BLOCK_SIZE, output_file);
+        fwrite(buffer, 1, BLOCK_SIZE, output_file);
     } else {
-        printf("adding padding block\n");
-        memset(&block[0][0], 0xFF, BLOCK_SIZE);
-        block[0][0] = (uint8_t)padding_bytes;
-        fwrite(&block[0][0], 1, BLOCK_SIZE, output_file);
+        memset(buffer, 0xFF, BLOCK_SIZE);
+        buffer[0] = (uint8_t)padding_bytes;
+        fwrite(buffer, 1, BLOCK_SIZE, output_file);
     }
 
     fclose(input_file);
@@ -415,17 +425,13 @@ void decrypt_file(const char *input_filename, const char *output_filename, const
     FILE *input_file = fopen(input_filename, "rb");
     FILE *output_file = fopen(output_filename, "wb");
 
-    if (input_file == NULL) {
-        printf("Не удалось открыть входной файл\n");
-        return;
-    }
-    if (output_file == NULL) {
-        printf("Не удалось открыть выходной файл\n");
-        fclose(input_file);
+    if (input_file == NULL || output_file == NULL) {
+        printf("Ошибка открытия файла\n");
+        if (input_file) fclose(input_file);
+        if (output_file) fclose(output_file);
         return;
     }
 
-    uint8_t block[N][N];
     fseek(input_file, 0, SEEK_END);
     const long file_size = ftell(input_file);
 
@@ -436,17 +442,20 @@ void decrypt_file(const char *input_filename, const char *output_filename, const
         return;
     }
 
+    uint8_t buffer[BLOCK_SIZE];
+    uint8_t block[N][N];
+
     // Читаем последний блок для определения паддинга
     fseek(input_file, -BLOCK_SIZE, SEEK_END);
-    fread(&block[0][0], 1, BLOCK_SIZE, input_file);
+    fread(buffer, 1, BLOCK_SIZE, input_file);
     fseek(input_file, 0, SEEK_SET);
 
     bool is_buffer_zero = true;
     int zeros = 0;
     for (int i = 0; i < BLOCK_SIZE; i++) {
-        if (block[i/N][i%N] != 0xFF) {
+        if (buffer[i] != 0xFF) {
             is_buffer_zero = false;
-            zeros = block[0][0];
+            zeros = buffer[0];
             break;
         }
     }
@@ -458,30 +467,28 @@ void decrypt_file(const char *input_filename, const char *output_filename, const
     uint8_t newGamma[BLOCK_SIZE];
     memcpy(gamma, expandedKey, BLOCK_SIZE);
 
-    // Обработка первого блока
-    fread(&block[0][0], 1, BLOCK_SIZE, input_file);
-    memcpy(newGamma, &block[0][0], BLOCK_SIZE);
-    AES_Decrypt(block, expandedKey);
-    xor_blocks(block, gamma);
-    fwrite(&block[0][0], 1, BLOCK_SIZE, output_file);
-    memcpy(gamma, newGamma, BLOCK_SIZE);
+    // Обработка всех блоков
+    for (long i = 0; i < blocks_to_read + 1; i++) {
+        fread(buffer, 1, BLOCK_SIZE, input_file);
+        memcpy(newGamma, buffer, BLOCK_SIZE);
 
-    // Обработка остальных блоков
-    for (long i = 1; i < blocks_to_read; i++) {
-        fread(&block[0][0], 1, BLOCK_SIZE, input_file);
-        memcpy(newGamma, &block[0][0], BLOCK_SIZE);
+        array_to_block(buffer, block);
         AES_Decrypt(block, expandedKey);
-        xor_blocks(block, gamma);
-        fwrite(&block[0][0], 1, BLOCK_SIZE, output_file);
+        block_to_array(block, buffer);
+
+        // XOR с гаммой
+        for (int j = 0; j < BLOCK_SIZE; j++) {
+            buffer[j] ^= gamma[j];
+        }
+
+        // Записываем блок
+        if (i == blocks_to_read && !is_buffer_zero) {
+            fwrite(buffer, 1, BLOCK_SIZE - zeros, output_file);
+        } else {
+            fwrite(buffer, 1, BLOCK_SIZE, output_file);
+        }
+
         memcpy(gamma, newGamma, BLOCK_SIZE);
-    }
-
-    // Обработка последнего блока с учётом паддинга
-    if (!is_buffer_zero) {
-        fread(&block[0][0], 1, BLOCK_SIZE, input_file);
-        AES_Decrypt(block, expandedKey);
-        xor_blocks(block, gamma);
-        fwrite(&block[0][0], 1, BLOCK_SIZE - zeros, output_file);
     }
 
     fclose(input_file);
@@ -490,25 +497,14 @@ void decrypt_file(const char *input_filename, const char *output_filename, const
 }
 
 
-
 int main() {
-
-    uint8_t block[N][N] = {
-    {0xd4, 0xe0, 0xb8, 0x1e},
-    {0x27, 0xbf, 0xb4, 0x41},
-    {0x11, 0x98, 0x5D, 0x52},
-    {0xae, 0xf1, 0xe5, 0x30}
-    };
-
-
-    uint8_t masterKey[16];
+        uint8_t masterKey[16];
     uint8_t expandedKey[176];
 
-
     const char *key_filename = "/Users/cartman/files/psu/AES/masterKey";
-    const char *text_filename = "/Users/cartman/files/psu/AES/img.png";
+    const char *text_filename = "/Users/cartman/files/psu/AES/text";
     const char *encrypted_filename = "/Users/cartman/files/psu/AES/encrypted";
-    const char *decrypted_filename = "/Users/cartman/files/psu/AES/decrypted.png";
+    const char *decrypted_filename = "/Users/cartman/files/psu/AES/decrypted";
 
     read_key(key_filename, masterKey);
     printf("Master key: ");
@@ -520,33 +516,11 @@ int main() {
     // Расширяем ключ
     KeyExpansion(masterKey, expandedKey);
 
-    // Выводим все раундовые ключи
-    // printf("Расширенный ключ (по раундам):\n");
-    // PrintExpandedKey(expandedKey);
-
-    // // Печать исходного блока
-    // printf("Исходный блок:\n");
-    // print_blck(block);
-    //
-    // // Шифрование
-    // AES_Encrypt(block, expandedKey);
-    // printf("После шифрования:\n");
-    // print_blck(block);
-    //
-    // // Расшифрование
-    // AES_Decrypt(block, expandedKey);
-    // printf("После расшифрования:\n");
-    // print_blck(block);
-
     encrypt_file(text_filename, encrypted_filename, expandedKey);
     decrypt_file(encrypted_filename, decrypted_filename, expandedKey);
 
-
     return 0;
 }
-
-
-
 
 // void MixColumns(uint8_t (*block)[N]) {
 //     uint8_t tmp[4];
@@ -600,64 +574,3 @@ bf b4 41 27
 30 ae f1 e5
 
  */
-
-// HARD CODE variant
-
-// // Умножение на 2 в GF(2^8)
-// uint8_t mul2(uint8_t a) {
-//     return (a << 1) ^ (a & 0x80 ? 0x1B : 0x00);
-// }
-//
-// // Умножение на 3 в GF(2^8): (a * 2) ⊕ a
-// uint8_t mul3(uint8_t a) {
-//     return mul2(a) ^ a;
-// }
-// // Умножение на 9 в GF(2^8)
-// uint8_t mul9(uint8_t a) {
-//     return mul2(mul2(mul2(a))) ^ a;
-// }
-//
-// // Умножение на 11 (0x0B) в GF(2^8)
-// uint8_t mul11(uint8_t a) {
-//     return mul2(mul2(mul2(a))) ^ mul2(a) ^ a;
-// }
-//
-// // Умножение на 13 (0x0D) в GF(2^8)
-// uint8_t mul13(uint8_t a) {
-//     return mul2(mul2(mul2(a))) ^ mul2(mul2(a)) ^ a;
-// }
-//
-// // Умножение на 14 (0x0E) в GF(2^8)
-// uint8_t mul14(uint8_t a) {
-//     return mul2(mul2(mul2(a))) ^ mul2(mul2(a)) ^ mul2(a);
-// }
-//
-// void MixColumns(uint8_t (*block)[N]) {
-//     uint8_t tmp[N];
-//
-//     for (int j = 0; j < N; j++) {
-//         for (int i = 0; i < N; i++) {
-//             tmp[i] = block[i][j];
-//         }
-//
-//         block[0][j] = mul2(tmp[0]) ^ mul3(tmp[1]) ^ tmp[2] ^ tmp[3];
-//         block[1][j] = tmp[0] ^ mul2(tmp[1]) ^ mul3(tmp[2]) ^ tmp[3];
-//         block[2][j] = tmp[0] ^ tmp[1] ^ mul2(tmp[2]) ^ mul3(tmp[3]);
-//         block[3][j] = mul3(tmp[0]) ^ tmp[1] ^ tmp[2] ^ mul2(tmp[3]);
-//     }
-// }
-//
-// void InvMixColumns(uint8_t (*block)[N]) {
-//     uint8_t tmp[N];
-//
-//     for (int j = 0; j < N; j++) {
-//         for (int i = 0; i < N; i++) {
-//             tmp[i] = block[i][j];
-//         }
-//
-//         block[0][j] = mul14(tmp[0]) ^ mul11(tmp[1]) ^ mul13(tmp[2]) ^ mul9(tmp[3]);
-//         block[1][j] = mul9(tmp[0]) ^ mul14(tmp[1]) ^ mul11(tmp[2]) ^ mul13(tmp[3]);
-//         block[2][j] = mul13(tmp[0]) ^ mul9(tmp[1]) ^ mul14(tmp[2]) ^ mul11(tmp[3]);
-//         block[3][j] = mul11(tmp[0]) ^ mul13(tmp[1]) ^ mul9(tmp[2]) ^ mul14(tmp[3]);
-//     }
-// }
